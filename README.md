@@ -3,7 +3,7 @@ a small demo
 
 ```
 python3 -m venv . 
-source bin/active
+source bin/activate
 pip install -r requirements.txt
 python main.py -h
 ```

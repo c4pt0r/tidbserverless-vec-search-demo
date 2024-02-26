@@ -93,6 +93,7 @@ class EmbeddingModel(BaseModel):
 def create_tables():
     conn = get_tidb_connection()
     cursor = conn.cursor()
+    # create database if not exists
     cursor.execute(ArticleModel.sql())
     cursor.execute(ChunkModel.sql())
     cursor.execute(EmbeddingModel.sql())

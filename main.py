@@ -1,3 +1,4 @@
+import sys
 import time
 import optparse
 import hashlib
@@ -37,6 +38,8 @@ def download_from_urls(urls: list) -> None:
     for url in urls:
         if hash(url) not in exists_hashes:
             text, links = url2text_artical(url)
+            if links is None:
+                links = []
             article_id = generate_id()
             # insert new articles
             article = ArticleModel(article_id=article_id,
@@ -57,6 +60,7 @@ def download_from_urls(urls: list) -> None:
         chunk_modles = []
         embedding_models = []
         embeddings, chunks = get_chunks_embeddings(article.content)
+        article_id = article.article_id
         for i, chunk_text in enumerate(chunks):
             chunk_id = generate_id()
             vec = embeddings[i].tolist()
@@ -192,7 +196,10 @@ if __name__ == '__main__':
     if options.url_list_file:
         with open(options.url_list_file, 'r') as f:
             urls = f.readlines()
-            download_from_urls(urls)
+            # 10 pages a batch, need a worker pool?
+            for i in range(0, len(urls), 20):
+                download_from_urls(urls[i:i+20])
+                print('next batch...')
     if options.query:
         embedding = get_embedding(options.query)
         ret = search_embedding_top_n_all(get_tidb_connection(), embedding)
@@ -201,3 +208,7 @@ if __name__ == '__main__':
     if options.server:
         addr = options.server.split(':')
         app.run(host=addr[0], port=int(addr[1]), debug=True)
+    if not options.rss and not options.url_list_file and not options.query and not options.server:
+        url = sys.argv[1]
+        download_from_urls([url])
+        print('Done')

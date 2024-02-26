@@ -179,11 +179,14 @@ def search_embedding_top_n_all(conn, embeddings, n = 10):
                c.chunk_id, 
                c.chunk_text, 
                c.article_id,
+               a.title,
+               a.source_url,
                VEC_Cosine_Distance(e.embeddings, %s) AS d
         FROM embeddings e
         JOIN chunks c ON e.chunk_id = c.chunk_id
         JOIN articles a ON c.article_id = a.article_id
-        ORDER BY d 
+        AND LENGTH(c.chunk_text) > 50
+        ORDER BY d ASC
         LIMIT %s
     '''
     cursor = conn.cursor()
@@ -194,8 +197,17 @@ def search_embedding_top_n_all(conn, embeddings, n = 10):
         chunk_id = row[1]
         chunk_text = row[2]
         article_id = row[3]
-        distance = row[4]
-        ret.append((chunk_id, chunk_text, article_id, distance))
+        title = row[4]
+        url = row[5]
+        distance = row[6]
+        ret.append({
+            'chunk_id': chunk_id,
+            'content': chunk_text,
+            'article_id': article_id,
+            'distance': distance,
+            'title': title,
+            'url': url
+        })
     cursor.close()
     return ret
 

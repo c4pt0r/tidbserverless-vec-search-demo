@@ -2,6 +2,9 @@ import time
 import hashlib
 import feedparser
 import newspaper
+import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from bs4 import BeautifulSoup
 from newspaper import Article
 from mattsollamatools import chunker
@@ -24,21 +27,83 @@ def hash(text : str) -> str:
     md5.update(text.encode('utf-8'))
     return md5.hexdigest()
 
-def download_from_urls(urls: list) -> None:
-    conn = get_tidb_connection()
-    url_hashes = []
-    for url in urls:
-        url_hashes.append(hash(url))
-    exists_hashes = filter_existed_url_hashes(conn, url_hashes)
+class Task:
+    def __init__(self, func, *args, **kwargs):
+        self.func = func
+        self.args = args
+        self.kwargs = kwargs
+        self.result = None
+        self.status = 'pending'
+        self.mu = threading.Lock()
 
-    new_articles = []
+    def update_status(self, status):
+        with self.mu:
+            self.status = status
+    
+    def get_status(self):
+        with self.mu:
+            return self.status
+    
+    def get_result(self):
+        with self.mu:
+            return self.result
+
+    def set_result(self, result):
+        with self.mu:
+            self.result = result
+ 
+    def run(self):
+        self.update_status('running')
+        try:
+            ret = self.func(*self.args, **self.kwargs)
+        except Exception as e:
+            self.set_result(e)
+            self.update_status('error')
+            return
+        self.set_result(ret)
+        self.update_status('done')
+
+class DownloadTask(Task):
+    def __init__(self, url):
+        super().__init__(url2text_artical, url)
+        self.url = url
+
+
+class WorkerPool:
+    def __init__(self, max_workers = 0):
+        if max_workers == 0:
+            max_workers = os.cpu_count()
+        self.executor = ThreadPoolExecutor(max_workers=max_workers)
+
+    def submit_task(self, task):
+        self.executor.submit(task.run)
+
+    def shutdown(self):
+        self.executor.shutdown(wait=True)
+
+    def submit_tasks_and_wait(self, tasks):
+        for task in tasks:
+            self.submit_task(task)
+        for task in tasks:
+            while task.get_status() != 'done' and task.get_status() != 'error':
+                time.sleep(0.1)
+        self.shutdown()
+        return [task.get_result() for task in tasks if task.get_status() == 'done']
+
+def download_from_urls_parallel(urls: list) -> (list[ArticleModel], list):
+    error_list = []
+    tasks = []
     for url in urls:
-        if hash(url) not in exists_hashes:
-            text, links = url2text_artical(url)
-            if links is None:
-                links = []
+        tasks.append(DownloadTask(url))
+    pool = WorkerPool()
+    pool.submit_tasks_and_wait(tasks)
+    # collect results
+    new_articles = []
+    for task in tasks:
+        if task.get_status() == 'done':
+            text, links = task.get_result()
+            url = task.url
             article_id = generate_id()
-            # insert new articles
             article = ArticleModel(article_id=article_id,
                                     title=url,
                                     content=text,
@@ -46,35 +111,74 @@ def download_from_urls(urls: list) -> None:
                                     url_hash=hash(url),
                                     related_links=links + [url])
             new_articles.append(article)
-    if len(new_articles) > 0:
-        print('found new articles, inserting...')
-        insert_articles(conn, new_articles)
-    else:
-        print('No new articles found')
-        return
+        elif task.get_status() == 'error':
+            error_list.append(task.get_result())
+    return new_articles, error_list
+
+def insert_articles_and_embeddings_parallel(articles: list[ArticleModel]) -> list:
+    pool = WorkerPool()
+    ret = []
+    tasks = []
+    for article in articles:
+        t = Task(insert_articles_and_embeddings, [article])
+        pool.submit_task(t)
+        tasks.append(t)
+    # collect results
+    for task in tasks:
+        while task.get_status() != 'done' and task.get_status() != 'error':
+            time.sleep(0.1)
+    pool.shutdown()
+    return [r.get_result() for r in tasks if r.get_status() == 'done']
+
+def insert_articles_and_embeddings(articles: list[ArticleModel]) -> list:
+    conn = get_tidb_connection()
+    # first insert articles
+    article_ids = []
+    insert_articles(conn, articles)
     # build chunks and embeddings
-    for article in new_articles:
+    for article in articles:
         chunk_modles = []
         embedding_models = []
-        embeddings, chunks = get_chunks_embeddings(article.content)
-        article_id = article.article_id
+        embeddings, chunks = get_chunks_embeddings(article.title + '\n' + article.content)
         for i, chunk_text in enumerate(chunks):
             chunk_id = generate_id()
             vec = embeddings[i].tolist()
-            chunk_model = ChunkModel(article_id=article_id,
-                                     chunk_id=chunk_id,
-                                     chunk_text=chunk_text)
+            chunk_model = ChunkModel(article_id=article.article_id,
+                                    chunk_id=chunk_id,
+                                    chunk_text=chunk_text)
             embedding_model = EmbeddingModel(
-                embedding_id=generate_id(),
-                chunk_id=chunk_id,
-                embedding_data=vec
-            )
+                                    embedding_id=generate_id(),
+                                    chunk_id=chunk_id,
+                                    embedding_data=vec
+                                )
             chunk_modles.append(chunk_model)
             embedding_models.append(embedding_model)
         insert_chunks(conn, chunk_modles)
         insert_embeddings(conn, embedding_models)
+        article_ids.append(article.article_id)
     conn.close()
-    print('Done')
+    return article_ids
+
+def download_from_urls(urls: list) -> None:
+    new_articles = []
+    for url in urls:
+        text, links = url2text_artical(url)
+        if links is None:
+            links = []
+        article_id = generate_id()
+        article = ArticleModel(article_id=article_id,
+                                title=url,
+                                content=text,
+                                source_url=url,
+                                url_hash=hash(url),
+                                related_links=links + [url])
+        new_articles.append(article)
+    return new_articles
+
+def get_new_urls(conn, url_list: list[str]) -> list[str]:
+    url_hash = [hash(url) for url in url_list]
+    exists = filter_existed_url_hashes(conn, url_hash)
+    return [url for url, h in zip(url_list, url_hash) if h not in exists]
 
 def download_from_rss(rss_url: str) -> None:
     feed = feedparser.parse(rss_url)

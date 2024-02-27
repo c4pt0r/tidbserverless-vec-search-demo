@@ -1,12 +1,10 @@
 import os
-import time
-import MySQLdb
+import pymysql as MySQLdb
 import json
 from snowflake import SnowflakeGenerator
 
 from pydantic import BaseModel
 from typing import Optional, List
-from pydantic.types import Json
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -93,7 +91,6 @@ class EmbeddingModel(BaseModel):
 def create_tables():
     conn = get_tidb_connection()
     cursor = conn.cursor()
-    # create database if not exists
     cursor.execute(ArticleModel.sql())
     cursor.execute(ChunkModel.sql())
     cursor.execute(EmbeddingModel.sql())
